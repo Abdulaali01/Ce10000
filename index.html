@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>تحليل INC + الموقع</title>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<style>
+*{box-sizing:border-box}
+body{font-family:tahoma;background:#f4f6fb;padding:16px}
+
+.card{
+background:#fff;
+border-radius:12px;
+padding:16px;
+max-width:750px;
+margin:auto;
+box-shadow:0 6px 18px rgba(0,0,0,.1)
+}
+
+h3{margin-top:0}
+
+input,textarea,button{
+width:100%;
+padding:12px;
+margin-top:8px;
+font-size:16px;
+border-radius:8px;
+border:1px solid #ddd
+}
+
+button{
+border:none;
+font-weight:bold;
+cursor:pointer
+}
+
+.btn{background:#1a73e8;color:#fff}
+.btn2{background:#25d366;color:#fff}
+
+.out{background:#eef2ff}
+
+.note{
+font-size:13px;
+color:#555;
+margin-top:6px;
+white-space:pre-wrap
+}
+
+.counter{
+background:#e8f0fe;
+color:#1a73e8;
+padding:10px;
+border-radius:10px;
+text-align:center;
+margin-bottom:10px;
+font-weight:bold
+}
+</style>
+</head>
+
+<body>
+
+<div class="card">
+
+<h3>📊 تحليل INC + الموقع</h3>
+
+<div id="counter" class="counter">عدد الطلبات: 0</div>
+
+<label><b>📥 رفع Excel</b></label>
+<input type="file" id="excelInput" accept=".xlsx,.xls">
+
+<hr>
+
+<label><b>✍️ إدخال رقم الطلب (INC)</b></label>
+<input id="manualReq" placeholder="INC-26-02-12345">
+
+<label><b>🖼️ رفع صورة</b></label>
+<input type="file" id="imageInput" accept="image/*">
+
+<button id="btnOCR" class="btn">🔍 تحليل</button>
+
+<p id="status" class="note"></p>
+
+<input id="reqValue" class="out" placeholder="رقم الطلب" readonly>
+<textarea id="linkValue" class="out" rows="2" placeholder="رابط الموقع" readonly></textarea>
+
+<button id="btnWA" class="btn2">📤 إرسال واتساب</button>
+
+<button id="btnXLS" class="btn">📥 تصدير Excel</button>
+
+</div>
+
+<script>
+
+const excelInput = document.getElementById("excelInput");
+const imageInput = document.getElementById("imageInput");
+const statusEl   = document.getElementById("status");
+const counterEl  = document.getElementById("counter");
+const reqEl      = document.getElementById("reqValue");
+const linkEl     = document.getElementById("linkValue");
+const btnOCR     = document.getElementById("btnOCR");
+const btnWA      = document.getElementById("btnWA");
+const btnXLS     = document.getElementById("btnXLS");
+
+let tableData = [];
+let selectedImage = null;
+let usedRequests = JSON.parse(localStorage.getItem("usedRequests") || "[]");
+
+let reqCol = null;
+let linkCol = "موقع البلاغ";
+
+/* ===== عداد ===== */
+function updateCounter(){
+  counterEl.textContent = "عدد الطلبات: " + usedRequests.length;
+}
+updateCounter();
+
+/* ===== INC فقط ===== */
+function normalizeREQ(raw){
+  if(!raw) return "";
+
+  let s = String(raw).toUpperCase().replace(/\s+/g,"");
+  s = s.replace(/I\s*N\s*C/g,"INC");
+
+  const m = s.match(/INC-?\d{2}-?\d{2}-?\d{4,6}/);
+  if(!m) return "";
+
+  let v = m[0];
+  v = v.replace(/^INC-?/,"INC-");
+  v = v.replace(/INC-(\d{2})-?(\d{2})-?(\d+)/,"INC-$1-$2-$3");
+
+  return v;
+}
+
+/* ===== اكتشاف عمود رقم الطلب ===== */
+function detectReqColumn(sample){
+  const keys = Object.keys(sample);
+
+  function clean(s){
+    return s.replace(/\s+/g,"").toLowerCase();
+  }
+
+  for(let k of keys){
+    let c = clean(k);
+    if(c.includes("رقم") || c.includes("طلب") || c.includes("inc")){
+      reqCol = k;
+      break;
+    }
+  }
+}
+
+/* ===== قراءة Excel ===== */
+excelInput.addEventListener("change", async (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+
+  try{
+    statusEl.textContent = "جاري تحميل Excel...";
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf,{type:"array"});
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    tableData = XLSX.utils.sheet_to_json(sheet,{defval:""});
+
+    if(tableData.length){
+      detectReqColumn(tableData[0]);
+    }
+
+    statusEl.textContent = "تم تحميل Excel ("+tableData.length+")";
+
+  }catch(err){
+    statusEl.textContent = "خطأ في قراءة Excel";
+  }
+});
+
+/* ===== صورة ===== */
+imageInput.addEventListener("change",(e)=>{
+  selectedImage = e.target.files[0];
+});
+
+/* ===== تحليل ===== */
+btnOCR.addEventListener("click", async ()=>{
+
+  let manual = normalizeREQ(document.getElementById("manualReq").value);
+  let req = manual;
+
+  if(!req){
+    if(!selectedImage){
+      alert("أدخل رقم INC أو صورة");
+      return;
+    }
+
+    statusEl.textContent = "جاري قراءة الصورة...";
+
+    const res = await Tesseract.recognize(selectedImage,"eng",{
+      logger:m=>{
+        if(m.progress){
+          statusEl.textContent = "جاري التحليل " + Math.round(m.progress*100)+"%";
+        }
+      }
+    });
+
+    req = normalizeREQ(res.data.text);
+  }
+
+  if(!req){
+    alert("لم يتم استخراج INC");
+    return;
+  }
+
+  reqEl.value = req;
+
+  if(!reqCol){
+    alert("لم يتم التعرف على عمود رقم الطلب");
+    return;
+  }
+
+  const row = tableData.find(r=>{
+    return normalizeREQ(r[reqCol]) === req;
+  });
+
+  if(!row){
+    statusEl.textContent = "❌ غير موجود";
+    linkEl.value = "";
+    return;
+  }
+
+  linkEl.value = row[linkCol] || "";
+
+  if(!usedRequests.find(x=>x["رقم الطلب"]===req)){
+    usedRequests.push({
+      "رقم الطلب":req,
+      "الموقع":linkEl.value
+    });
+    localStorage.setItem("usedRequests",JSON.stringify(usedRequests));
+    updateCounter();
+  }
+
+  statusEl.textContent = "✅ تم العثور";
+
+});
+
+/* ===== واتساب (صورة + نص) ===== */
+btnWA.addEventListener("click", async ()=>{
+
+  const req = reqEl.value;
+  const link = linkEl.value;
+
+  if(!selectedImage || !req || !link){
+    alert("لا يوجد بيانات كاملة");
+    return;
+  }
+
+  const text = `${req}\n${link}`;
+
+  try{
+    if(navigator.canShare && navigator.canShare({ files: [selectedImage] })){
+
+      const file = new File([selectedImage], selectedImage.name, {
+        type: selectedImage.type
+      });
+
+      await navigator.share({
+        files: [file],
+        text: text
+      });
+
+    }else{
+      window.open(`https://wa.me/?text=${encodeURIComponent(text)}`);
+    }
+
+  }catch(e){
+    alert("فشل الإرسال أو تم الإلغاء");
+  }
+
+});
+
+/* ===== تصدير Excel ===== */
+btnXLS.addEventListener("click",()=>{
+  if(!usedRequests.length){
+    alert("لا يوجد بيانات");
+    return;
+  }
+
+  const ws = XLSX.utils.json_to_sheet(usedRequests);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,"INC");
+  XLSX.writeFile(wb,"INC.xlsx");
+});
+
+</script>
+
+</body>
+</html>
