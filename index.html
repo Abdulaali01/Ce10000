@@ -69,15 +69,15 @@ font-weight:bold
 
 <h3>📊 تحليل INC + الموقع</h3>
 
-<div id="counter" class="counter">عدد الطلبات: 0</div>
+<div id="counter" class="counter">عدد العمليات: 0</div>
 
 <label><b>📥 رفع Excel</b></label>
 <input type="file" id="excelInput" accept=".xlsx,.xls">
 
 <hr>
 
-<label><b>✍️ إدخال رقم الطلب (INC)</b></label>
-<input id="manualReq" placeholder="INC-26-02-12345">
+<label><b>✍️ إدخال رقم الطلب (INC أو آخر 6 أرقام)</b></label>
+<input id="manualReq" placeholder="INC-26-02-123456 أو 123456">
 
 <label><b>🖼️ رفع صورة</b></label>
 <input type="file" id="imageInput" accept="image/*">
@@ -90,7 +90,6 @@ font-weight:bold
 <textarea id="linkValue" class="out" rows="2" placeholder="رابط الموقع" readonly></textarea>
 
 <button id="btnWA" class="btn2">📤 إرسال واتساب</button>
-
 <button id="btnXLS" class="btn">📥 تصدير Excel</button>
 
 </div>
@@ -109,21 +108,19 @@ const btnXLS     = document.getElementById("btnXLS");
 
 let tableData = [];
 let selectedImage = null;
-let usedRequests = JSON.parse(localStorage.getItem("usedRequests") || "[]");
+let usedRequests = [];
 
 let reqCol = null;
 let linkCol = "موقع البلاغ";
 
 /* ===== عداد ===== */
 function updateCounter(){
-  counterEl.textContent = "عدد الطلبات: " + usedRequests.length;
+  counterEl.textContent = "عدد العمليات: " + usedRequests.length;
 }
-updateCounter();
 
-/* ===== INC فقط ===== */
+/* ===== تنظيف INC ===== */
 function normalizeREQ(raw){
   if(!raw) return "";
-
   let s = String(raw).toUpperCase().replace(/\s+/g,"");
   s = s.replace(/I\s*N\s*C/g,"INC");
 
@@ -137,16 +134,15 @@ function normalizeREQ(raw){
   return v;
 }
 
-/* ===== اكتشاف عمود رقم الطلب ===== */
+function getLast6(v){
+  const m = v.match(/\d{6}$/);
+  return m ? m[0] : "";
+}
+
 function detectReqColumn(sample){
   const keys = Object.keys(sample);
-
-  function clean(s){
-    return s.replace(/\s+/g,"").toLowerCase();
-  }
-
   for(let k of keys){
-    let c = clean(k);
+    let c = k.replace(/\s+/g,"").toLowerCase();
     if(c.includes("رقم") || c.includes("طلب") || c.includes("inc")){
       reqCol = k;
       break;
@@ -154,27 +150,19 @@ function detectReqColumn(sample){
   }
 }
 
-/* ===== قراءة Excel ===== */
+/* ===== Excel ===== */
 excelInput.addEventListener("change", async (e)=>{
   const file = e.target.files[0];
-  if(!file) return;
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf,{type:"array"});
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  tableData = XLSX.utils.sheet_to_json(sheet,{defval:""});
 
-  try{
-    statusEl.textContent = "جاري تحميل Excel...";
-    const buf = await file.arrayBuffer();
-    const wb = XLSX.read(buf,{type:"array"});
-    const sheet = wb.Sheets[wb.SheetNames[0]];
-    tableData = XLSX.utils.sheet_to_json(sheet,{defval:""});
-
-    if(tableData.length){
-      detectReqColumn(tableData[0]);
-    }
-
-    statusEl.textContent = "تم تحميل Excel ("+tableData.length+")";
-
-  }catch(err){
-    statusEl.textContent = "خطأ في قراءة Excel";
+  if(tableData.length){
+    detectReqColumn(tableData[0]);
   }
+
+  statusEl.textContent = "تم تحميل Excel";
 });
 
 /* ===== صورة ===== */
@@ -185,58 +173,50 @@ imageInput.addEventListener("change",(e)=>{
 /* ===== تحليل ===== */
 btnOCR.addEventListener("click", async ()=>{
 
-  let manual = normalizeREQ(document.getElementById("manualReq").value);
-  let req = manual;
+  let input = document.getElementById("manualReq").value.trim();
+  let req = normalizeREQ(input);
 
-  if(!req){
+  let isLast6 = /^\d{6}$/.test(input);
+  let last6 = isLast6 ? input : getLast6(req);
+
+  if(!req && !isLast6){
     if(!selectedImage){
-      alert("أدخل رقم INC أو صورة");
+      alert("أدخل رقم أو صورة");
       return;
     }
 
-    statusEl.textContent = "جاري قراءة الصورة...";
-
-    const res = await Tesseract.recognize(selectedImage,"eng",{
-      logger:m=>{
-        if(m.progress){
-          statusEl.textContent = "جاري التحليل " + Math.round(m.progress*100)+"%";
-        }
-      }
-    });
-
+    const res = await Tesseract.recognize(selectedImage,"eng");
     req = normalizeREQ(res.data.text);
+    last6 = getLast6(req);
   }
 
-  if(!req){
-    alert("لم يتم استخراج INC");
-    return;
+  let row = null;
+
+  if(isLast6){
+    row = tableData.find(r=> getLast6(normalizeREQ(r[reqCol])) === last6);
+  }else{
+    row = tableData.find(r=> normalizeREQ(r[reqCol]) === req);
+    if(!row){
+      row = tableData.find(r=> getLast6(normalizeREQ(r[reqCol])) === last6);
+    }
   }
-
-  reqEl.value = req;
-
-  if(!reqCol){
-    alert("لم يتم التعرف على عمود رقم الطلب");
-    return;
-  }
-
-  const row = tableData.find(r=>{
-    return normalizeREQ(r[reqCol]) === req;
-  });
 
   if(!row){
     statusEl.textContent = "❌ غير موجود";
-    linkEl.value = "";
     return;
   }
 
+  const finalReq = normalizeREQ(row[reqCol]);
+
+  reqEl.value = finalReq;
   linkEl.value = row[linkCol] || "";
 
-  if(!usedRequests.find(x=>x["رقم الطلب"]===req)){
+  // حفظ
+  if(!usedRequests.find(x => x["رقم الطلب"] === finalReq)){
     usedRequests.push({
-      "رقم الطلب":req,
-      "الموقع":linkEl.value
+      "رقم الطلب": finalReq,
+      "موقع البلاغ": linkEl.value
     });
-    localStorage.setItem("usedRequests",JSON.stringify(usedRequests));
     updateCounter();
   }
 
@@ -244,7 +224,7 @@ btnOCR.addEventListener("click", async ()=>{
 
 });
 
-/* ===== واتساب (صورة + نص) ===== */
+/* ===== واتساب ===== */
 btnWA.addEventListener("click", async ()=>{
 
   const req = reqEl.value;
@@ -258,29 +238,24 @@ btnWA.addEventListener("click", async ()=>{
   const text = `${req}\n${link}`;
 
   try{
-    if(navigator.canShare && navigator.canShare({ files: [selectedImage] })){
+    const file = new File([selectedImage], selectedImage.name, {
+      type: selectedImage.type
+    });
 
-      const file = new File([selectedImage], selectedImage.name, {
-        type: selectedImage.type
-      });
-
-      await navigator.share({
-        files: [file],
-        text: text
-      });
-
-    }else{
-      window.open(`https://wa.me/?text=${encodeURIComponent(text)}`);
-    }
+    await navigator.share({
+      files: [file],
+      text: text
+    });
 
   }catch(e){
-    alert("فشل الإرسال أو تم الإلغاء");
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`);
   }
 
 });
 
-/* ===== تصدير Excel ===== */
+/* ===== Excel Export ===== */
 btnXLS.addEventListener("click",()=>{
+
   if(!usedRequests.length){
     alert("لا يوجد بيانات");
     return;
@@ -289,7 +264,9 @@ btnXLS.addEventListener("click",()=>{
   const ws = XLSX.utils.json_to_sheet(usedRequests);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,"INC");
+
   XLSX.writeFile(wb,"INC.xlsx");
+
 });
 
 </script>
